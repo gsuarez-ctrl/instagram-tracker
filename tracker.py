@@ -49,182 +49,105 @@ class InstagramScraper:
         """Login to Instagram with enhanced error handling"""
         try:
             logger.info("Navigating to Instagram login page...")
-            self.page.goto('https://www.instagram.com/', wait_until='networkidle')
-            time.sleep(random.uniform(3, 5))
+            self.page.goto('https://www.instagram.com/', timeout=30000)
+            time.sleep(2)
 
             # Handle cookie acceptance if present
             try:
                 cookie_button = self.page.get_by_role("button", name="Allow all cookies")
                 if cookie_button:
                     cookie_button.click()
-                    time.sleep(2)
-            except:
-                pass
-
-            # Handle "Log in" button if present
-            try:
-                login_button = self.page.get_by_text('Log in')
-                if login_button:
-                    login_button.click()
-                    time.sleep(2)
+                    time.sleep(1)
             except:
                 pass
 
             logger.info("Entering login credentials...")
-            
             # Enter username
-            username_field = self.page.wait_for_selector('input[name="username"]', timeout=10000)
+            username_field = self.page.wait_for_selector('input[name="username"]', timeout=5000)
             username_field.fill(self.username)
-            time.sleep(random.uniform(0.5, 1.5))
+            time.sleep(1)
 
             # Enter password
             password_field = self.page.wait_for_selector('input[name="password"]')
             password_field.fill(self.password)
-            time.sleep(random.uniform(0.5, 1.5))
+            time.sleep(1)
 
             # Click login button
             self.page.wait_for_selector('button[type="submit"]').click()
-            time.sleep(5)
+            time.sleep(3)
 
-            # Check for successful login
-            success = False
-            try:
-                success_indicators = [
-                    lambda: 'instagram.com/accounts/onetap/' in self.page.url,
-                    lambda: 'instagram.com/' == self.page.url,
-                    lambda: self.page.query_selector('nav') is not None,
-                    lambda: self.page.query_selector('[data-testid="user-avatar"]') is not None,
-                    lambda: not self.page.query_selector('input[name="username"]')
-                ]
-                
-                for indicator in success_indicators:
-                    if indicator():
-                        success = True
-                        break
-
-            except Exception as e:
-                logger.error(f"Error checking login status: {str(e)}")
-
-            if not success:
-                logger.error("Login unsuccessful")
-                self.page.screenshot(path='login_failed.png')
-                raise Exception("Login verification failed")
-
-            logger.info("Successfully logged in to Instagram")
-            return True
+            # Quick check for successful login
+            if not self.page.query_selector('input[name="username"]'):
+                logger.info("Successfully logged in to Instagram")
+                return True
+            else:
+                raise Exception("Login failed - still on login page")
 
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
-            try:
-                self.page.screenshot(path='error_screenshot.png')
-            except:
-                pass
             raise
 
     def get_follower_count(self, username):
         """Get follower count for a specific account"""
-        max_retries = 3
-        for attempt in range(max_retries):
+        try:
+            logger.info(f"Getting follower count for {username}...")
+            
+            # Navigate with timeout
+            self.page.goto(f'https://www.instagram.com/{username}/', timeout=10000)
+            time.sleep(2)
+
+            # Quick check for profile existence
+            if "Sorry, this page isn't available." in self.page.content():
+                logger.error(f"Profile {username} does not exist or is private")
+                return None
+
+            # Try to find follower count in page source
+            page_content = self.page.content()
+            
+            # Method 1: Try JSON data in page source
+            json_match = re.search(r'"edge_followed_by":{"count":(\d+)}', page_content)
+            if json_match:
+                return int(json_match.group(1))
+
+            # Method 2: Try meta description
+            meta_desc = self.page.get_attribute('meta[property="og:description"]', 'content')
+            if meta_desc:
+                followers_match = re.search(r'([\d,]+)\s+Followers', meta_desc)
+                if followers_match:
+                    return self._convert_count(followers_match.group(1))
+
+            # Method 3: Try visible elements
             try:
-                logger.info(f"Navigating to {username}'s profile...")
-                self.page.goto(f'https://www.instagram.com/{username}/', wait_until='networkidle')
-                time.sleep(random.uniform(3, 5))
-
-                # Wait for content to load
-                self.page.wait_for_load_state('networkidle')
-
-                # Try multiple methods to get follower count
-                methods = [
-                    self._get_followers_from_meta,
-                    self._get_followers_from_elements,
-                    self._get_followers_from_html
-                ]
-
-                for method in methods:
-                    try:
-                        count = method(username)
-                        if count is not None:
-                            logger.info(f"Successfully retrieved follower count for {username}: {count}")
-                            return count
-                    except Exception as e:
-                        logger.debug(f"Method failed: {str(e)}")
-                        continue
-
-                # If we get here, save screenshot and retry
-                self.page.screenshot(path=f'debug_{username}_{attempt}.png')
-                raise Exception("Could not find follower count")
-
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Error getting followers for {username} after {max_retries} attempts: {str(e)}")
-                    return None
-                logger.warning(f"Attempt {attempt + 1} failed for {username}, retrying...")
-                time.sleep(5 * (attempt + 1))
-
-    def _get_followers_from_meta(self, username):
-        """Get follower count from meta tag"""
-        meta_content = self.page.get_attribute('meta[property="og:description"]', 'content')
-        if meta_content:
-            matches = re.findall(r'([\d,]+)\s+Followers', meta_content)
-            if matches:
-                return self._convert_count(matches[0])
-        return None
-
-    def _get_followers_from_elements(self, username):
-        """Get follower count from page elements"""
-        selectors = [
-            'a[href$="/followers/"] span',
-            'a[href*="followers"] span',
-            'ul li span span',
-            '//section//ul//span[contains(text(), "followers")]/parent::*/span',
-            '//div[contains(@class, "_ac2a")]/span/span'
-        ]
-
-        for selector in selectors:
-            try:
-                if selector.startswith('//'):
-                    element = self.page.locator(selector).first
-                else:
-                    element = self.page.locator(selector).first
-                
-                if element:
-                    text = element.inner_text()
-                    if any(char.isdigit() for char in text):
-                        return self._convert_count(text)
+                follower_element = self.page.wait_for_selector('a[href$="/followers/"] span', timeout=5000)
+                if follower_element:
+                    return self._convert_count(follower_element.inner_text())
             except:
-                continue
-        return None
+                pass
 
-    def _get_followers_from_html(self, username):
-        """Get follower count from page HTML"""
-        content = self.page.content()
-        matches = re.findall(r'"edge_followed_by":{"count":(\d+)}', content)
-        if matches:
-            return int(matches[0])
-        return None
+            logger.error(f"Could not find follower count for {username}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting followers for {username}: {str(e)}")
+            return None
 
     def _convert_count(self, count_text):
         """Convert Instagram follower count text to number"""
         try:
-            count_text = count_text.strip().replace(',', '').replace(' ', '').lower()
-            
+            count_text = count_text.strip().replace(',', '').lower()
             multiplier = 1
+
             if 'k' in count_text:
                 multiplier = 1000
                 count_text = count_text.replace('k', '')
             elif 'm' in count_text:
                 multiplier = 1000000
                 count_text = count_text.replace('m', '')
-                
+
             if '.' in count_text:
-                number = float(count_text) * multiplier
-            else:
-                number = int(count_text) * multiplier
-                
-            return int(round(number))
-            
-        except Exception as e:
-            logger.error(f"Error converting count text '{count_text}': {str(e)}")
+                return int(float(count_text) * multiplier)
+            return int(count_text) * multiplier
+        except:
             return None
 
 def setup_google_sheets():
@@ -285,16 +208,14 @@ def main():
         
         # Initialize scraper and get follower counts
         with InstagramScraper(username, password) as scraper:
-            logger.info("Setting up Instagram scraper...")
             scraper.login()
             
             # Get follower counts
             follower_counts = []
             for account in accounts:
-                logger.info(f"Getting follower count for {account}...")
                 count = scraper.get_follower_count(account)
                 follower_counts.append(count)
-                time.sleep(random.uniform(3, 5))
+                time.sleep(1)  # Brief delay between accounts
         
         # Update spreadsheet
         logger.info("Updating Google Spreadsheet...")
