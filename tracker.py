@@ -4,6 +4,7 @@ import time
 import random
 import logging
 import re
+import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -122,128 +123,126 @@ class InstagramScraper:
             raise
 
     def get_follower_count(self, username):
-        """Get follower count using multiple methods"""
+        """Get follower count using multiple extraction methods"""
         try:
             logger.info(f"Getting follower count for {username}...")
 
-            # Navigate to profile
+            # Navigate to profile and wait for content
             self.page.goto(f'https://www.instagram.com/{username}/')
-            time.sleep(4)
+            time.sleep(5)  # Allow dynamic content to load
 
-            # Execute JavaScript to extract follower count
-            count = self.page.evaluate('''(username) => {
-                // Helper function to parse count text
-                function parseCount(text) {
-                    if (!text) return null;
-                    text = text.toLowerCase().replace(/,/g, '');
-                    let multiplier = 1;
-                    if (text.includes('k')) {
-                        multiplier = 1000;
-                        text = text.replace('k', '');
-                    } else if (text.includes('m')) {
-                        multiplier = 1000000;
-                        text = text.replace('m', '');
-                    }
-                    const number = parseFloat(text) * multiplier;
-                    return number > 0 ? Math.round(number) : null;
-                }
+            # First get all the HTML content
+            page_source = self.page.content()
+            
+            # Save HTML for debugging
+            with open(f'debug_{username}_source.html', 'w', encoding='utf-8') as f:
+                f.write(page_source)
 
-                // Try various methods to find follower count
+            # Method 1: Look for data in shared data script
+            shared_data = self.page.evaluate('''() => {
                 try {
-                    // Method 1: Look for section statistics
-                    const sections = document.querySelectorAll('section');
-                    for (const section of sections) {
-                        if (section.textContent.includes('follower')) {
-                            const text = section.textContent.match(/([\d,.]+[KkMm]?)\s*follower/i);
-                            if (text) {
-                                const count = parseCount(text[1]);
-                                if (count) return count;
-                            }
-                        }
-                    }
-
-                    // Method 2: Check meta description
-                    const metaDesc = document.querySelector('meta[property="og:description"]');
-                    if (metaDesc) {
-                        const text = metaDesc.content.match(/([\d,.]+[KkMm]?)\s*Followers/i);
-                        if (text) {
-                            const count = parseCount(text[1]);
-                            if (count) return count;
-                        }
-                    }
-
-                    // Method 3: Look for specific elements
-                    const selectors = [
-                        'header section ul li',
-                        'span[title*="follower"]',
-                        'a[href*="followers"]',
-                        '[role="button"]:has-text("follower")'
-                    ];
-
-                    for (const selector of selectors) {
-                        const elements = document.querySelectorAll(selector);
-                        for (const el of elements) {
-                            if (el.textContent.includes('follower')) {
-                                const text = el.textContent.match(/([\d,.]+[KkMm]?)/);
-                                if (text) {
-                                    const count = parseCount(text[1]);
-                                    if (count) return count;
-                                }
-                            }
-                        }
-                    }
-
-                    // Method 4: Search all elements as last resort
-                    const allElements = document.querySelectorAll('*');
-                    for (const el of allElements) {
-                        if (el.textContent.includes('follower')) {
-                            const text = el.textContent.match(/([\d,.]+[KkMm]?)\s*follower/i);
-                            if (text) {
-                                const count = parseCount(text[1]);
-                                if (count) return count;
-                            }
-                        }
-                    }
+                    return window._sharedData;
                 } catch (e) {
-                    console.error('Error in follower extraction:', e);
+                    return null;
                 }
+            }''')
 
-                return null;
-            }''', username)
+            if shared_data and 'entry_data' in shared_data:
+                try:
+                    user_info = shared_data['entry_data']['ProfilePage'][0]['graphql']['user']
+                    count = user_info['edge_followed_by']['count']
+                    logger.info(f"Found follower count from shared data: {count}")
+                    return count
+                except:
+                    pass
 
-            if count:
-                logger.info(f"Found follower count for {username}: {count}")
-                return count
-
-            # If JavaScript method fails, try backup method
+            # Method 2: Direct API call (after getting cookies from browser)
             try:
-                page_content = self.page.content()
-                # Look for follower count in various formats
-                patterns = [
-                    r'"edge_followed_by":\{"count":(\d+)\}',
-                    r'"followers":(\d+)',
-                    r'([\d,\.]+[KkMm]?)\s*Followers',
-                    r'([\d,\.]+[KkMm]?)\s*followers'
-                ]
+                cookies = '; '.join([f"{c['name']}={c['value']}" for c in self.page.context.cookies()])
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'text/html,application/json',
+                    'Cookie': cookies
+                }
+                
+                response = requests.get(
+                    f'https://i.instagram.com/api/v1/users/web_profile_info/?username={username}',
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'data' in data and 'user' in data['data']:
+                        count = data['data']['user']['edge_followed_by']['count']
+                        logger.info(f"Found follower count from API: {count}")
+                        return count
+            except:
+                pass
 
-                for pattern in patterns:
-                    matches = re.findall(pattern, page_content)
-                    if matches:
-                        for match in matches:
-                            count = self._convert_count(match)
-                            if count:
-                                logger.info(f"Found follower count using pattern: {count}")
+            # Method 3: Extract from additional user data
+            additional_data = self.page.evaluate('''() => {
+                try {
+                    return window.__additionalData;
+                } catch (e) {
+                    return null;
+                }
+            }''')
+
+            if additional_data:
+                try:
+                    for key in additional_data:
+                        if 'data' in additional_data[key]:
+                            user = additional_data[key]['data']['user']
+                            if user and 'edge_followed_by' in user:
+                                count = user['edge_followed_by']['count']
+                                logger.info(f"Found follower count from additional data: {count}")
                                 return count
+                except:
+                    pass
 
-            except Exception as e:
-                logger.debug(f"Backup extraction failed: {str(e)}")
+            # Method 4: Parse from meta tags
+            meta_content = self.page.evaluate('''() => {
+                const metaTags = document.querySelectorAll('meta');
+                for (const tag of metaTags) {
+                    const content = tag.getAttribute('content');
+                    if (content && content.includes('Followers')) {
+                        return content;
+                    }
+                }
+                return null;
+            }''')
 
-            # Save debug information
-            self.page.screenshot(path=f'debug_{username}.png')
-            with open(f'debug_{username}.html', 'w', encoding='utf-8') as f:
-                f.write(self.page.content())
+            if meta_content:
+                matches = re.findall(r'([\d,\.]+[KkMm]?)\s*Followers', meta_content)
+                if matches:
+                    count = self._convert_count(matches[0])
+                    if count:
+                        logger.info(f"Found follower count from meta: {count}")
+                        return count
+
+            # Method 5: Use browser dev tools to get network requests
+            client = self.page.context.new_cdp_session(self.page)
+            client.send("Network.enable")
+            
+            # Reload page to capture requests
+            self.page.reload()
+            time.sleep(3)
+
+            try:
+                responses = client.send("Network.getAllResponseBodies")
+                for response in responses:
+                    if 'edge_followed_by' in response:
+                        data = json.loads(response)
+                        if 'data' in data and 'user' in data['data']:
+                            count = data['data']['user']['edge_followed_by']['count']
+                            logger.info(f"Found follower count from network: {count}")
+                            return count
+            except:
+                pass
 
             logger.error(f"Could not find follower count for {username}")
+            self.page.screenshot(path=f'debug_{username}.png')
             return None
 
         except Exception as e:
