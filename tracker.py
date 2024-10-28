@@ -167,4 +167,82 @@ class InstagramScraper:
             logger.error(f"Error converting count text '{count_text}': {str(e)}")
             return None
 
-# [Rest of the code remains exactly the same...]
+def setup_google_sheets():
+    """Setup Google Sheets API client"""
+    try:
+        credentials_json = base64.b64decode(os.environ['GOOGLE_CREDENTIALS']).decode('utf-8')
+        credentials_dict = json.loads(credentials_json)
+        
+        credentials = service_account.Credentials.from_service_account_info(
+            credentials_dict,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        
+        service = build('sheets', 'v4', credentials=credentials)
+        return service
+    except Exception as e:
+        logger.error(f"Failed to setup Google Sheets: {str(e)}")
+        raise
+
+def update_spreadsheet(service, data):
+    """Update Google Spreadsheet with follower counts"""
+    try:
+        spreadsheet_id = os.environ['SPREADSHEET_ID']
+        date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        values = [[date] + [str(count) if count is not None else 'N/A' for count in data]]
+        
+        body = {
+            'values': values
+        }
+        
+        service.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id,
+            range='Sheet1!A:Z',
+            valueInputOption='USER_ENTERED',
+            body=body
+        ).execute()
+        
+        logger.info(f"Data updated successfully at {date}")
+        return True
+    except Exception as e:
+        logger.error(f"Error updating spreadsheet: {str(e)}")
+        raise
+
+def main():
+    logger.info("Starting Instagram follower tracking...")
+    
+    try:
+        username = os.environ['IG_USERNAME']
+        password = os.environ['IG_PASSWORD']
+        
+        # Setup Google Sheets
+        logger.info("Setting up Google Sheets client...")
+        sheets_service = setup_google_sheets()
+        
+        # Get accounts to track
+        accounts = json.loads(os.environ['ACCOUNTS_TO_TRACK'])
+        logger.info(f"Tracking {len(accounts)} accounts: {', '.join(accounts)}")
+        
+        # Initialize scraper and get follower counts
+        with InstagramScraper(username, password) as scraper:
+            scraper.login()
+            
+            # Get follower counts
+            follower_counts = []
+            for account in accounts:
+                count = scraper.get_follower_count(account)
+                follower_counts.append(count)
+                time.sleep(1)  # Brief delay between accounts
+        
+        # Update spreadsheet
+        logger.info("Updating Google Spreadsheet...")
+        success = update_spreadsheet(sheets_service, follower_counts)
+        
+        logger.info("Script completed successfully!")
+        
+    except Exception as e:
+        logger.error(f"Error in main execution: {str(e)}")
+        raise
+
+if __name__ == "__main__":
+    main()
