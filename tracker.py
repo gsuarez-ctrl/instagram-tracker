@@ -14,9 +14,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class InstagramScraper:
-    def __init__(self, username, password):
-        self.username = username
-        self.password = password
+    def __init__(self, session_cookie):
+        self.session_cookie = session_cookie
         self.loader = instaloader.Instaloader(
             quiet=True,
             download_pictures=False,
@@ -28,13 +27,21 @@ class InstagramScraper:
             compress_json=False
         )
 
-    def login(self):
-        """Login to Instagram"""
+    def login_with_session(self):
+        """Login to Instagram using session cookie"""
         try:
-            logger.info("Logging in to Instagram...")
-            self.loader.login(self.username, self.password)
-            logger.info("Successfully logged in to Instagram")
-            return True
+            logger.info("Logging in to Instagram using session cookie...")
+            # Load session from cookie
+            self.loader.context.load_session_from_string(self.session_cookie)
+            
+            # Verify session is working
+            test_profile = instaloader.Profile.from_username(self.loader.context, "instagram")
+            if test_profile.followers > 0:
+                logger.info("Successfully logged in to Instagram")
+                return True
+            else:
+                raise Exception("Session verification failed")
+                
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
             raise
@@ -44,10 +51,8 @@ class InstagramScraper:
         try:
             logger.info(f"Getting follower count for {username}...")
             
-            # Get profile
+            # Get profile info
             profile = instaloader.Profile.from_username(self.loader.context, username)
-            
-            # Get follower count
             count = profile.followers
             
             logger.info(f"Found follower count for {username}: {count}")
@@ -105,8 +110,7 @@ def main():
     logger.info("Starting Instagram follower tracking...")
     
     try:
-        username = os.environ['IG_USERNAME']
-        password = os.environ['IG_PASSWORD']
+        session_cookie = os.environ['IG_SESSION_COOKIE']
         
         # Setup Google Sheets
         logger.info("Setting up Google Sheets client...")
@@ -117,10 +121,10 @@ def main():
         logger.info(f"Tracking {len(accounts)} accounts: {', '.join(accounts)}")
         
         # Initialize scraper and login
-        scraper = InstagramScraper(username, password)
-        scraper.login()
+        scraper = InstagramScraper(session_cookie)
+        scraper.login_with_session()
         
-        # Get follower counts with delay between requests
+        # Get follower counts
         follower_counts = []
         for account in accounts:
             try:
