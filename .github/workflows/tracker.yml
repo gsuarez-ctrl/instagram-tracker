@@ -22,8 +22,7 @@ jobs:
 
       - name: Run tracker
         env:
-          IG_USERNAME: ${{ secrets.IG_USERNAME }}
-          IG_PASSWORD: ${{ secrets.IG_PASSWORD }}
+          IG_SESSION_COOKIE: ${{ secrets.IG_SESSION_COOKIE }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           ACCOUNTS_TO_TRACK: ${{ secrets.ACCOUNTS_TO_TRACK }}
