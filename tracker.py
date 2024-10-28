@@ -21,14 +21,12 @@ def setup_instagram_client():
         
         logger.info("Attempting to login to Instagram...")
         
-        # Initialize client with more realistic device settings
+        # Initialize client with correct user agent format
         settings = {
-            'device_string': '28/9.0; 640dpi; 1440x2560; samsung; SM-G965F',
-            'guid': str(random.randint(1000000000, 9999999999)),
-            'phone_id': str(random.randint(1000000000, 9999999999)),
-            'user_agent': 'Instagram 269.0.0.18.75 Android'
+            'user_agent': 'Instagram 146.0.0.27.125 Android (28/9.0; 420dpi; 1080x2034; samsung; SM-G960F; starlte; samsungexynos9810; en_US; 228966451)'
         }
         
+        # Create client instance
         api = Client(username, password, **settings)
         logger.info("Successfully logged in to Instagram")
         return api
