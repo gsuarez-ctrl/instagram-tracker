@@ -69,3 +69,5 @@ If you encounter any issues:
 
 ## License
 MIT License - feel free to modify and use as needed!
+
+## Setup as personal with @gmail.com
