@@ -8,8 +8,8 @@ import instaloader
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import base64
+import requests
 import pickle
-import tempfile
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -28,18 +28,26 @@ class InstagramScraper:
             save_metadata=False,
             compress_json=False
         )
+        self.context = instaloader.InstaloaderContext(self.loader)
 
     def login_with_session(self):
         """Login to Instagram using session cookie"""
         try:
             logger.info("Logging in to Instagram using session cookie...")
             
-            # Set session cookie
-            self.loader.context.session.cookies.set(
-                'sessionid',
-                self.session_cookie,
-                domain='.instagram.com'
-            )
+            # Create session and set cookie
+            session = requests.Session()
+            session.cookies.set('sessionid', self.session_cookie, domain='.instagram.com')
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Connection': 'keep-alive'
+            })
+            
+            # Set the session in the context
+            self.context._session = session
+            self.loader.context = self.context
             
             # Verify session is working
             try:
