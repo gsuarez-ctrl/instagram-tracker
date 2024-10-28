@@ -43,15 +43,20 @@ class InstagramScraper:
             self.playwright.stop()
 
     def verify_login(self):
+        """Verify login status using multiple methods"""
         success_indicators = [
             lambda: not bool(self.page.query_selector('input[name="username"]')),
             lambda: bool(self.page.query_selector('[aria-label="Search"]')),
             lambda: bool(self.page.query_selector('[aria-label="Home"]')),
+            lambda: bool(self.page.query_selector('svg[aria-label="Home"]')),
+            lambda: bool(self.page.query_selector('a[href="/explore/"]')),
             lambda: 'login' not in self.page.url
         ]
+
         return any(indicator() for indicator in success_indicators)
 
     def login(self):
+        """Login to Instagram with enhanced error handling"""
         try:
             logger.info("Navigating to Instagram login page...")
             self.page.goto('https://www.instagram.com/accounts/login/')
@@ -100,49 +105,63 @@ class InstagramScraper:
         """Get follower count using multiple extraction methods"""
         try:
             logger.info(f"Getting follower count for {username}...")
-            self.page.goto(f'https://www.instagram.com/{username}/')
-            time.sleep(5)
 
-            # Método 1: Datos compartidos
-            shared_data = self.page.evaluate('() => window._sharedData || null')
-            if shared_data:
+            # Navigate to profile and wait for content
+            self.page.goto(f'https://www.instagram.com/{username}/')
+            time.sleep(5)  # Allow dynamic content to load
+
+            # First get all the HTML content
+            page_source = self.page.content()
+            with open(f'debug_{username}_source.html', 'w', encoding='utf-8') as f:
+                f.write(page_source)
+
+            # Check for shared data
+            shared_data = self.page.evaluate('''() => {
+                try {
+                    return window._sharedData;
+                } catch (e) {
+                    return null;
+                }
+            }''')
+
+            if shared_data and 'entry_data' in shared_data:
                 try:
                     user_info = shared_data['entry_data']['ProfilePage'][0]['graphql']['user']
                     count = user_info['edge_followed_by']['count']
                     logger.info(f"Found follower count from shared data: {count}")
                     return count
-                except KeyError as e:
-                    logger.warning(f"Shared data format has changed: {e}")
+                except KeyError:
+                    logger.warning("Shared data format has changed, unable to access follower count.")
+                    raise
 
-            # Método 2: Llamada a la API
+            # Method 2: Direct API call (after getting cookies from browser)
             cookies = '; '.join([f"{c['name']}={c['value']}" for c in self.page.context.cookies()])
             headers = {
-                'User-Agent': 'Mozilla/5.0',
-                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/json',
                 'Cookie': cookies
             }
-            
+
             response = requests.get(
                 f'https://i.instagram.com/api/v1/users/web_profile_info/?username={username}',
                 headers=headers,
                 timeout=10
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
                 if 'data' in data and 'user' in data['data']:
                     count = data['data']['user']['edge_followed_by']['count']
                     logger.info(f"Found follower count from API: {count}")
                     return count
-                else:
-                    logger.warning("API response format has changed.")
-            else:
-                logger.error(f"API request failed: {response.status_code} - {response.text}")
 
-            # Otros métodos (no implementados por brevedad)...
+            logger.error(f"Could not find follower count for {username}")
+            self.page.screenshot(path=f'debug_{username}.png')
+            return None
 
         except Exception as e:
             logger.error(f"Error getting followers for {username}: {str(e)}")
+            self.page.screenshot(path=f'error_{username}.png')
             return None
 
     def _convert_count(self, count_text):
@@ -157,9 +176,9 @@ class InstagramScraper:
                 multiplier = 1000000
                 count_text = count_text.replace('m', '')
 
-            return int(float(count_text) * multiplier) if count_text else None
-        except Exception as e:
-            logger.error(f"Error converting count: {str(e)}")
+            number = float(count_text) * multiplier
+            return int(round(number)) if number > 0 else None
+        except:
             return None
 
 def setup_google_sheets():
@@ -231,7 +250,7 @@ def main():
         
         # Update spreadsheet
         logger.info("Updating Google Spreadsheet...")
-        update_spreadsheet(sheets_service, follower_counts)
+        success = update_spreadsheet(sheets_service, follower_counts)
         
         logger.info("Script completed successfully!")
         
@@ -241,3 +260,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
