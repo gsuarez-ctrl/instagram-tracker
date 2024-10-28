@@ -1,4 +1,3 @@
-# tracker.py
 import os
 import json
 from instagrapi import Client
@@ -15,46 +14,27 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def setup_instagram_client():
-    """Initialize and login to Instagram client with enhanced security"""
+    """Initialize and login to Instagram client using session ID"""
     try:
         cl = Client()
-        # Set device settings
-        cl.set_device({
-            "app_version": "269.0.0.18.75",
-            "android_version": "28",
-            "android_release": "9.0",
-            "dpi": "640dpi",
-            "resolution": "1440x2560",
-            "manufacturer": "samsung",
-            "device": "SM-G965F",
-            "model": "star2qltecs",
-            "cpu": "samsungexynos9810",
-            "version_code": "314665256"
-        })
-
-        # Set basic settings
-        cl.set_user_agent("Instagram 269.0.0.18.75 Android (28/9.0; 640dpi; 1440x2560; samsung; SM-G965F; star2qltecs; samsungexynos9810; en_US; 314665256)")
+        session_id = os.environ['IG_SESSION_ID']
         
-        # Set zero data
-        cl.set_zero_data({})
-
-        # Login with additional settings
-        username = os.environ['IG_USERNAME']
-        password = os.environ['IG_PASSWORD']
-
-        logger.info(f"Attempting to login as {username}")
+        logger.info("Attempting to login using session ID...")
         
-        # Attempt login with verification handling
-        login_response = cl.login(username, password)
+        # Set session ID
+        cl.session_id = session_id
         
-        if login_response:
-            logger.info("Successfully logged in to Instagram")
+        # Verify the session is working
+        try:
+            cl.account_info()
+            logger.info("Successfully logged in to Instagram using session ID")
             return cl
-        else:
-            raise Exception("Login returned False")
+        except Exception as e:
+            logger.error(f"Session verification failed: {str(e)}")
+            raise
             
     except Exception as e:
-        logger.error(f"Failed to login to Instagram: {str(e)}")
+        logger.error(f"Failed to setup Instagram client: {str(e)}")
         raise
 
 def setup_google_sheets():
@@ -96,7 +76,7 @@ def update_spreadsheet(service, data):
     try:
         spreadsheet_id = os.environ['SPREADSHEET_ID']
         date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        values = [[date] + data]
+        values = [[date] + [str(count) if count is not None else 'N/A' for count in data]]
         
         body = {
             'values': values
