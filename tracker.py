@@ -34,7 +34,7 @@ class InstagramScraper:
         )
         self.context = self.browser.new_context(
             viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
         )
         self.page = self.context.new_page()
         return self
@@ -45,72 +45,89 @@ class InstagramScraper:
         if self.playwright:
             self.playwright.stop()
 
+    def wait_and_retry(self, action, max_attempts=3, timeout=30000):
+        """Helper method to wait and retry actions"""
+        for attempt in range(max_attempts):
+            try:
+                return action()
+            except Exception as e:
+                if attempt == max_attempts - 1:
+                    raise
+                logger.warning(f"Attempt {attempt + 1} failed, retrying...")
+                time.sleep(5)
+
     def login(self):
         """Login to Instagram with enhanced error handling"""
         try:
             logger.info("Navigating to Instagram login page...")
-            self.page.goto('https://www.instagram.com/accounts/login/', timeout=20000)
-            time.sleep(2)
+            
+            # First try direct login page
+            self.wait_and_retry(
+                lambda: self.page.goto('https://www.instagram.com/accounts/login/', 
+                wait_until='domcontentloaded', timeout=30000)
+            )
+            time.sleep(5)  # Wait for JavaScript to load
+
+            # If login form not found, try homepage
+            if not self.page.query_selector('input[name="username"]'):
+                logger.info("Login form not found, trying homepage...")
+                self.wait_and_retry(
+                    lambda: self.page.goto('https://www.instagram.com/', 
+                    wait_until='domcontentloaded', timeout=30000)
+                )
+                time.sleep(5)
+
+            logger.info("Waiting for login form...")
+            # Wait for login form with multiple attempts
+            def find_login_form():
+                username_field = self.page.wait_for_selector('input[name="username"]', timeout=10000)
+                if not username_field:
+                    raise Exception("Username field not found")
+                return username_field
+
+            username_field = self.wait_and_retry(find_login_form)
 
             logger.info("Entering login credentials...")
-            # Enter username
-            username_field = self.page.wait_for_selector('input[name="username"]', timeout=5000)
-            username_field.fill(self.username)
-            time.sleep(1)
-
-            # Enter password
-            password_field = self.page.wait_for_selector('input[name="password"]')
-            password_field.fill(self.password)
-            time.sleep(1)
-
-            # Click login button
-            self.page.click('button[type="submit"]')
-            time.sleep(5)  # Increased wait time after login
-
-            # Multiple login verification attempts
-            success = False
-            try:
-                # Try multiple selectors that indicate successful login
-                success_selectors = [
-                    'svg[aria-label="Home"]',
-                    'a[href="/direct/inbox/"]',
-                    'span[aria-label="Home"]',
-                    'a[href^="/stories/"]',
-                    '[aria-label="Home"]',
-                    '[aria-label="Direct messaging"]',
-                    '[aria-label="Search"]',
-                    'a[href="/explore/"]'
-                ]
+            # Enter credentials with retries
+            def enter_credentials():
+                username_field.fill(self.username)
+                time.sleep(2)
                 
-                for selector in success_selectors:
-                    try:
-                        if self.page.wait_for_selector(selector, timeout=3000):
-                            success = True
-                            break
-                    except:
-                        continue
-
-                if not success:
-                    # Check if we're still on the login page
-                    if self.page.query_selector('input[name="username"]'):
-                        raise Exception("Still on login page")
-                    
-                    # Check URL
-                    current_url = self.page.url
-                    if 'login' not in current_url and 'instagram.com' in current_url:
-                        success = True
-
-            except Exception as e:
-                logger.warning(f"Initial login check failed: {str(e)}")
-
-            if success:
-                logger.info("Successfully logged in to Instagram")
-                time.sleep(2)  # Brief pause after successful login
+                password_field = self.page.wait_for_selector('input[name="password"]', timeout=10000)
+                password_field.fill(self.password)
+                time.sleep(2)
+                
+                submit_button = self.page.wait_for_selector('button[type="submit"]', timeout=10000)
+                submit_button.click()
                 return True
-            else:
-                # Save screenshot for debugging
+
+            self.wait_and_retry(enter_credentials)
+            time.sleep(5)  # Wait for login to process
+
+            # Verify login success with multiple methods
+            success = False
+            success_indicators = [
+                lambda: self.page.query_selector('svg[aria-label="Home"]') is not None,
+                lambda: self.page.query_selector('a[href="/direct/inbox/"]') is not None,
+                lambda: 'login' not in self.page.url,
+                lambda: not self.page.query_selector('input[name="username"]'),
+                lambda: self.page.query_selector('[aria-label="Search"]') is not None
+            ]
+
+            for indicator in success_indicators:
+                try:
+                    if indicator():
+                        success = True
+                        break
+                except:
+                    continue
+
+            if not success:
                 self.page.screenshot(path='login_failed.png')
-                raise Exception("Could not verify successful login")
+                raise Exception("Login verification failed")
+
+            logger.info("Successfully logged in to Instagram")
+            return True
 
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
@@ -148,12 +165,14 @@ class InstagramScraper:
         try:
             logger.info(f"Getting follower count for {username}...")
             
-            # Navigate to profile with shorter timeout
-            self.page.goto(f'https://www.instagram.com/{username}/', timeout=15000)
-            time.sleep(2)
+            def load_profile():
+                self.page.goto(f'https://www.instagram.com/{username}/', 
+                    wait_until='domcontentloaded', timeout=15000)
+                time.sleep(2)
+                return self.page.content()
 
-            # Get page content immediately
-            content = self.page.content()
+            # Load profile with retry mechanism
+            content = self.wait_and_retry(load_profile)
 
             # Check if profile exists
             if "Sorry, this page isn't available." in content:
@@ -166,7 +185,7 @@ class InstagramScraper:
                 logger.info(f"Found follower count for {username}: {count}")
                 return count
 
-            # If HTML parsing failed, try visible elements with very short timeout
+            # If HTML parsing failed, try visible elements
             try:
                 follower_element = self.page.wait_for_selector(
                     'a[href*="followers"] span, span[title$="followers"]',
@@ -190,19 +209,13 @@ class InstagramScraper:
     def _convert_count(self, count_text):
         """Convert Instagram follower count text to number"""
         try:
-            # Remove any non-numeric characters except K, M, k, m, and decimal point
             count_text = count_text.strip().replace(',', '')
-            
-            # Convert to lowercase for consistency
             count_text = count_text.lower()
             
-            # Handle K (thousands)
             if 'k' in count_text:
                 number = float(count_text.replace('k', '')) * 1000
-            # Handle M (millions)
             elif 'm' in count_text:
                 number = float(count_text.replace('m', '')) * 1000000
-            # Handle regular numbers
             else:
                 number = float(count_text)
             
