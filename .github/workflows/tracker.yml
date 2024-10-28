@@ -18,8 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install playwright google-api-python-client google-auth-httplib2 google-auth-oauthlib
-          playwright install  # Instalar todos los navegadores necesarios
+          pip install instaloader google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
       - name: Run tracker
         env:
@@ -29,13 +28,3 @@ jobs:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           ACCOUNTS_TO_TRACK: ${{ secrets.ACCOUNTS_TO_TRACK }}
         run: python tracker.py
-
-      - name: Upload debug screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshots
-          path: |
-            *.png
-            debug_*.png
-          retention-days: 5
