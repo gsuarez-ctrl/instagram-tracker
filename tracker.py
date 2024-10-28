@@ -7,15 +7,54 @@ from googleapiclient.discovery import build
 from datetime import datetime
 import time
 import base64
+import random
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def setup_instagram_client():
-    """Initialize and login to Instagram client"""
+    """Initialize and login to Instagram client with enhanced security"""
     try:
         cl = Client()
-        cl.login(os.environ['IG_USERNAME'], os.environ['IG_PASSWORD'])
-        return cl
+        # Set device settings
+        cl.set_device({
+            "app_version": "269.0.0.18.75",
+            "android_version": "28",
+            "android_release": "9.0",
+            "dpi": "640dpi",
+            "resolution": "1440x2560",
+            "manufacturer": "samsung",
+            "device": "SM-G965F",
+            "model": "star2qltecs",
+            "cpu": "samsungexynos9810",
+            "version_code": "314665256"
+        })
+
+        # Set basic settings
+        cl.set_user_agent("Instagram 269.0.0.18.75 Android (28/9.0; 640dpi; 1440x2560; samsung; SM-G965F; star2qltecs; samsungexynos9810; en_US; 314665256)")
+        
+        # Set zero data
+        cl.set_zero_data({})
+
+        # Login with additional settings
+        username = os.environ['IG_USERNAME']
+        password = os.environ['IG_PASSWORD']
+
+        logger.info(f"Attempting to login as {username}")
+        
+        # Attempt login with verification handling
+        login_response = cl.login(username, password)
+        
+        if login_response:
+            logger.info("Successfully logged in to Instagram")
+            return cl
+        else:
+            raise Exception("Login returned False")
+            
     except Exception as e:
-        print(f"Failed to login to Instagram: {str(e)}")
+        logger.error(f"Failed to login to Instagram: {str(e)}")
         raise
 
 def setup_google_sheets():
@@ -32,7 +71,7 @@ def setup_google_sheets():
         service = build('sheets', 'v4', credentials=credentials)
         return service
     except Exception as e:
-        print(f"Failed to setup Google Sheets: {str(e)}")
+        logger.error(f"Failed to setup Google Sheets: {str(e)}")
         raise
 
 def get_follower_count(client, username):
@@ -40,14 +79,17 @@ def get_follower_count(client, username):
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            time.sleep(random.uniform(2, 4))  # Random delay between requests
             user_id = client.user_id_from_username(username)
             user_info = client.user_info(user_id)
+            logger.info(f"Successfully retrieved follower count for {username}")
             return user_info.follower_count
         except Exception as e:
             if attempt == max_retries - 1:
-                print(f"Error getting followers for {username} after {max_retries} attempts: {str(e)}")
+                logger.error(f"Error getting followers for {username} after {max_retries} attempts: {str(e)}")
                 return None
-            time.sleep(5)  # Wait 5 seconds before retrying
+            logger.warning(f"Attempt {attempt + 1} failed for {username}, retrying...")
+            time.sleep(5 * (attempt + 1))  # Exponential backoff
 
 def update_spreadsheet(service, data):
     """Update Google Spreadsheet with follower counts"""
@@ -67,43 +109,43 @@ def update_spreadsheet(service, data):
             body=body
         ).execute()
         
-        print(f"Data updated successfully at {date}")
+        logger.info(f"Data updated successfully at {date}")
         return True
     except Exception as e:
-        print(f"Error updating spreadsheet: {str(e)}")
+        logger.error(f"Error updating spreadsheet: {str(e)}")
         raise
 
 def main():
-    print("Starting Instagram follower tracking...")
+    logger.info("Starting Instagram follower tracking...")
     
     try:
         # Initialize clients
-        print("Setting up Instagram client...")
+        logger.info("Setting up Instagram client...")
         ig_client = setup_instagram_client()
         
-        print("Setting up Google Sheets client...")
+        logger.info("Setting up Google Sheets client...")
         sheets_service = setup_google_sheets()
         
         # Get accounts to track
         accounts = json.loads(os.environ['ACCOUNTS_TO_TRACK'])
-        print(f"Tracking {len(accounts)} accounts: {', '.join(accounts)}")
+        logger.info(f"Tracking {len(accounts)} accounts: {', '.join(accounts)}")
         
         # Get follower counts
         follower_counts = []
         for account in accounts:
-            print(f"Getting follower count for {account}...")
+            logger.info(f"Getting follower count for {account}...")
             count = get_follower_count(ig_client, account)
             follower_counts.append(count)
-            time.sleep(3)  # Avoid rate limiting
+            time.sleep(random.uniform(3, 5))  # Random delay between accounts
         
         # Update spreadsheet
-        print("Updating Google Spreadsheet...")
+        logger.info("Updating Google Spreadsheet...")
         success = update_spreadsheet(sheets_service, follower_counts)
         
-        print("Script completed successfully!")
+        logger.info("Script completed successfully!")
         
     except Exception as e:
-        print(f"Error in main execution: {str(e)}")
+        logger.error(f"Error in main execution: {str(e)}")
         raise
 
 if __name__ == "__main__":
