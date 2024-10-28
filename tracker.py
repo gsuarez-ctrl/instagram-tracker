@@ -3,6 +3,7 @@ import json
 import time
 import random
 import logging
+import re
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -44,16 +45,6 @@ class InstagramScraper:
         if self.playwright:
             self.playwright.stop()
 
-    def wait_and_click(self, selector, timeout=30000):
-        """Wait for element and click it"""
-        try:
-            element = self.page.wait_for_selector(selector, timeout=timeout)
-            element.click()
-            return True
-        except Exception as e:
-            logger.error(f"Error clicking element {selector}: {str(e)}")
-            return False
-
     def login(self):
         """Login to Instagram with enhanced error handling"""
         try:
@@ -70,7 +61,7 @@ class InstagramScraper:
             except:
                 pass
 
-            # Click on login if we're on the main page
+            # Handle "Log in" button if present
             try:
                 login_button = self.page.get_by_text('Log in')
                 if login_button:
@@ -81,7 +72,7 @@ class InstagramScraper:
 
             logger.info("Entering login credentials...")
             
-            # Wait for username field and enter username
+            # Enter username
             username_field = self.page.wait_for_selector('input[name="username"]', timeout=10000)
             username_field.fill(self.username)
             time.sleep(random.uniform(0.5, 1.5))
@@ -92,16 +83,12 @@ class InstagramScraper:
             time.sleep(random.uniform(0.5, 1.5))
 
             # Click login button
-            login_button = self.page.wait_for_selector('button[type="submit"]')
-            login_button.click()
-            
-            # Wait for navigation and check for successful login
-            time.sleep(5)  # Wait for potential redirects
+            self.page.wait_for_selector('button[type="submit"]').click()
+            time.sleep(5)
 
-            # Check for various success indicators
+            # Check for successful login
             success = False
             try:
-                # Check for common success indicators
                 success_indicators = [
                     lambda: 'instagram.com/accounts/onetap/' in self.page.url,
                     lambda: 'instagram.com/' == self.page.url,
@@ -114,12 +101,12 @@ class InstagramScraper:
                     if indicator():
                         success = True
                         break
-                        
+
             except Exception as e:
                 logger.error(f"Error checking login status: {str(e)}")
 
             if not success:
-                logger.error("Login unsuccessful - could not verify success indicators")
+                logger.error("Login unsuccessful")
                 self.page.screenshot(path='login_failed.png')
                 raise Exception("Login verification failed")
 
@@ -135,39 +122,36 @@ class InstagramScraper:
             raise
 
     def get_follower_count(self, username):
-        """Get follower count for a specific account with enhanced error handling"""
+        """Get follower count for a specific account"""
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # Navigate to profile
                 logger.info(f"Navigating to {username}'s profile...")
                 self.page.goto(f'https://www.instagram.com/{username}/', wait_until='networkidle')
                 time.sleep(random.uniform(3, 5))
 
-                # Look for the followers count with multiple selector options
-                selectors = [
-                    'a[href$="/followers/"] span',
-                    'a[href*="followers"] span',
-                    '[data-testid="profile-stats"] span',
-                    'ul li span span',
+                # Wait for content to load
+                self.page.wait_for_load_state('networkidle')
+
+                # Try multiple methods to get follower count
+                methods = [
+                    self._get_followers_from_meta,
+                    self._get_followers_from_elements,
+                    self._get_followers_from_html
                 ]
 
-                follower_count = None
-                for selector in selectors:
+                for method in methods:
                     try:
-                        element = self.page.wait_for_selector(selector, timeout=5000)
-                        if element:
-                            text = element.inner_text()
-                            if any(char.isdigit() for char in text):
-                                follower_count = self._convert_count(text)
-                                break
-                    except:
+                        count = method(username)
+                        if count is not None:
+                            logger.info(f"Successfully retrieved follower count for {username}: {count}")
+                            return count
+                    except Exception as e:
+                        logger.debug(f"Method failed: {str(e)}")
                         continue
 
-                if follower_count is not None:
-                    logger.info(f"Successfully retrieved follower count for {username}: {follower_count}")
-                    return follower_count
-                
+                # If we get here, save screenshot and retry
+                self.page.screenshot(path=f'debug_{username}_{attempt}.png')
                 raise Exception("Could not find follower count")
 
             except Exception as e:
@@ -177,26 +161,68 @@ class InstagramScraper:
                 logger.warning(f"Attempt {attempt + 1} failed for {username}, retrying...")
                 time.sleep(5 * (attempt + 1))
 
+    def _get_followers_from_meta(self, username):
+        """Get follower count from meta tag"""
+        meta_content = self.page.get_attribute('meta[property="og:description"]', 'content')
+        if meta_content:
+            matches = re.findall(r'([\d,]+)\s+Followers', meta_content)
+            if matches:
+                return self._convert_count(matches[0])
+        return None
+
+    def _get_followers_from_elements(self, username):
+        """Get follower count from page elements"""
+        selectors = [
+            'a[href$="/followers/"] span',
+            'a[href*="followers"] span',
+            'ul li span span',
+            '//section//ul//span[contains(text(), "followers")]/parent::*/span',
+            '//div[contains(@class, "_ac2a")]/span/span'
+        ]
+
+        for selector in selectors:
+            try:
+                if selector.startswith('//'):
+                    element = self.page.locator(selector).first
+                else:
+                    element = self.page.locator(selector).first
+                
+                if element:
+                    text = element.inner_text()
+                    if any(char.isdigit() for char in text):
+                        return self._convert_count(text)
+            except:
+                continue
+        return None
+
+    def _get_followers_from_html(self, username):
+        """Get follower count from page HTML"""
+        content = self.page.content()
+        matches = re.findall(r'"edge_followed_by":{"count":(\d+)}', content)
+        if matches:
+            return int(matches[0])
+        return None
+
     def _convert_count(self, count_text):
         """Convert Instagram follower count text to number"""
         try:
-            count_text = count_text.replace(',', '').replace('.', '').lower().strip()
+            count_text = count_text.strip().replace(',', '').replace(' ', '').lower()
+            
             multiplier = 1
-            
             if 'k' in count_text:
-                count_text = count_text.replace('k', '')
                 multiplier = 1000
+                count_text = count_text.replace('k', '')
             elif 'm' in count_text:
-                count_text = count_text.replace('m', '')
                 multiplier = 1000000
-            
-            # Handle decimal points in K/M numbers
-            if '.' in count_text:
-                base = float(count_text)
-            else:
-                base = int(count_text)
+                count_text = count_text.replace('m', '')
                 
-            return int(base * multiplier)
+            if '.' in count_text:
+                number = float(count_text) * multiplier
+            else:
+                number = int(count_text) * multiplier
+                
+            return int(round(number))
+            
         except Exception as e:
             logger.error(f"Error converting count text '{count_text}': {str(e)}")
             return None
@@ -246,7 +272,6 @@ def main():
     logger.info("Starting Instagram follower tracking...")
     
     try:
-        # Initialize variables
         username = os.environ['IG_USERNAME']
         password = os.environ['IG_PASSWORD']
         
@@ -269,7 +294,7 @@ def main():
                 logger.info(f"Getting follower count for {account}...")
                 count = scraper.get_follower_count(account)
                 follower_counts.append(count)
-                time.sleep(random.uniform(3, 5))  # Random delay between requests
+                time.sleep(random.uniform(3, 5))
         
         # Update spreadsheet
         logger.info("Updating Google Spreadsheet...")
