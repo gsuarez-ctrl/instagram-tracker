@@ -8,6 +8,8 @@ import instaloader
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import base64
+import pickle
+import tempfile
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -31,16 +33,23 @@ class InstagramScraper:
         """Login to Instagram using session cookie"""
         try:
             logger.info("Logging in to Instagram using session cookie...")
-            # Load session from cookie
-            self.loader.context.load_session_from_string(self.session_cookie)
+            
+            # Set session cookie
+            self.loader.context.session.cookies.set(
+                'sessionid',
+                self.session_cookie,
+                domain='.instagram.com'
+            )
             
             # Verify session is working
-            test_profile = instaloader.Profile.from_username(self.loader.context, "instagram")
-            if test_profile.followers > 0:
-                logger.info("Successfully logged in to Instagram")
-                return True
-            else:
-                raise Exception("Session verification failed")
+            try:
+                test_profile = instaloader.Profile.from_username(self.loader.context, "instagram")
+                if test_profile.followers > 0:
+                    logger.info("Successfully logged in to Instagram")
+                    return True
+            except Exception as e:
+                logger.error(f"Session verification failed: {str(e)}")
+                raise
                 
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
@@ -48,22 +57,31 @@ class InstagramScraper:
 
     def get_follower_count(self, username):
         """Get follower count for a specific account"""
-        try:
-            logger.info(f"Getting follower count for {username}...")
-            
-            # Get profile info
-            profile = instaloader.Profile.from_username(self.loader.context, username)
-            count = profile.followers
-            
-            logger.info(f"Found follower count for {username}: {count}")
-            return count
+        max_retries = 3
+        retry_delay = 5
 
-        except instaloader.exceptions.ProfileNotExistsException:
-            logger.error(f"Profile {username} does not exist")
-            return None
-        except Exception as e:
-            logger.error(f"Error getting followers for {username}: {str(e)}")
-            return None
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Getting follower count for {username} (attempt {attempt + 1}/{max_retries})...")
+                
+                # Get profile info
+                profile = instaloader.Profile.from_username(self.loader.context, username)
+                count = profile.followers
+                
+                logger.info(f"Found follower count for {username}: {count}")
+                return count
+
+            except instaloader.exceptions.ProfileNotExistsException:
+                logger.error(f"Profile {username} does not exist")
+                return None
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Attempt {attempt + 1} failed for {username}: {str(e)}")
+                    time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                    continue
+                else:
+                    logger.error(f"Error getting followers for {username} after {max_retries} attempts: {str(e)}")
+                    return None
 
 def setup_google_sheets():
     """Setup Google Sheets API client"""
@@ -124,17 +142,18 @@ def main():
         scraper = InstagramScraper(session_cookie)
         scraper.login_with_session()
         
-        # Get follower counts
+        # Get follower counts with retry mechanism
         follower_counts = []
         for account in accounts:
             try:
                 count = scraper.get_follower_count(account)
                 follower_counts.append(count)
-                # Random delay between requests
-                time.sleep(random.uniform(2, 4))
+                # Random delay between requests to avoid rate limiting
+                time.sleep(random.uniform(3, 5))
             except Exception as e:
                 logger.error(f"Failed to get count for {account}: {str(e)}")
                 follower_counts.append(None)
+                time.sleep(5)  # Additional delay after error
         
         # Update spreadsheet
         logger.info("Updating Google Spreadsheet...")
