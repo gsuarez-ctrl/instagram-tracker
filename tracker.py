@@ -4,7 +4,6 @@ import time
 import random
 import logging
 import re
-import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -23,8 +22,6 @@ class InstagramScraper:
         self.browser = None
         self.context = None
         self.page = None
-        self.csrf_token = None
-        self.cookies = None
 
     def __enter__(self):
         self.playwright = sync_playwright().start()
@@ -61,20 +58,11 @@ class InstagramScraper:
 
         return any(indicator() for indicator in success_indicators)
 
-    def wait_for_navigation(self):
-        """Wait for page navigation to complete"""
-        try:
-            self.page.wait_for_load_state('networkidle', timeout=10000)
-            time.sleep(2)  # Additional small delay
-        except:
-            pass
-
     def login(self):
-        """Login to Instagram and get necessary tokens"""
+        """Login to Instagram with enhanced error handling"""
         try:
             logger.info("Navigating to Instagram login page...")
             self.page.goto('https://www.instagram.com/accounts/login/')
-            self.wait_for_navigation()
             time.sleep(4)
 
             logger.info("Entering login credentials...")
@@ -100,26 +88,22 @@ class InstagramScraper:
                 raise Exception("Submit button not found")
             
             submit_button.click()
-            time.sleep(5)  # Wait for login process
-
-            # Wait for initial navigation
-            self.wait_for_navigation()
+            time.sleep(5)
 
             # Multiple verification attempts
             max_attempts = 3
             login_verified = False
             
             for attempt in range(max_attempts):
+                logger.info(f"Login verification attempt {attempt + 1}/{max_attempts}")
                 if self.verify_login():
                     login_verified = True
                     break
-                logger.info(f"Login verification attempt {attempt + 1}/{max_attempts}")
                 time.sleep(5)
 
             if not login_verified:
                 # Try navigating to home page as final attempt
                 self.page.goto('https://www.instagram.com/')
-                self.wait_for_navigation()
                 time.sleep(3)
                 
                 if not self.verify_login():
@@ -127,15 +111,6 @@ class InstagramScraper:
                     raise Exception("Could not verify successful login")
 
             logger.info("Successfully logged in to Instagram")
-
-            # Get cookies and csrf token
-            cookies = self.context.cookies()
-            self.cookies = {cookie['name']: cookie['value'] for cookie in cookies if cookie['domain'] == '.instagram.com'}
-            self.csrf_token = self.cookies.get('csrftoken')
-
-            if not self.csrf_token:
-                raise Exception("Could not obtain CSRF token")
-
             return True
 
         except Exception as e:
@@ -147,94 +122,128 @@ class InstagramScraper:
             raise
 
     def get_follower_count(self, username):
-        """Get follower count using Instagram's GraphQL API"""
+        """Get follower count using multiple methods"""
         try:
             logger.info(f"Getting follower count for {username}...")
 
-            # First try: Public API endpoint
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'X-CSRFToken': self.csrf_token,
-                'X-IG-App-ID': '936619743392459',
-                'X-ASBD-ID': '198387',
-                'X-IG-WWW-Claim': '0',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': f'https://www.instagram.com/{username}/',
-                'Origin': 'https://www.instagram.com'
-            }
-
-            url = f'https://www.instagram.com/api/v1/users/web_profile_info/?username={username}'
-            response = requests.get(
-                url,
-                headers=headers,
-                cookies=self.cookies,
-                timeout=10
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                if 'data' in data and 'user' in data['data']:
-                    count = data['data']['user']['edge_followed_by']['count']
-                    logger.info(f"Found follower count for {username}: {count}")
-                    return count
-
-            # Second try: Scrape from page
-            logger.info(f"API request failed, trying page scrape for {username}")
+            # Navigate to profile
             self.page.goto(f'https://www.instagram.com/{username}/')
-            self.wait_for_navigation()
-            time.sleep(3)
+            time.sleep(4)
 
-            # Try multiple methods to find follower count
-            page_content = self.page.content()
-            
-            # Method 1: Try JSON data in scripts
-            json_matches = re.findall(r'"edge_followed_by":\{"count":(\d+)\}', page_content)
-            if json_matches:
-                count = int(json_matches[0])
-                logger.info(f"Found follower count from JSON: {count}")
-                return count
+            # Execute JavaScript to extract follower count
+            count = self.page.evaluate('''(username) => {
+                // Helper function to parse count text
+                function parseCount(text) {
+                    if (!text) return null;
+                    text = text.toLowerCase().replace(/,/g, '');
+                    let multiplier = 1;
+                    if (text.includes('k')) {
+                        multiplier = 1000;
+                        text = text.replace('k', '');
+                    } else if (text.includes('m')) {
+                        multiplier = 1000000;
+                        text = text.replace('m', '');
+                    }
+                    const number = parseFloat(text) * multiplier;
+                    return number > 0 ? Math.round(number) : null;
+                }
 
-            # Method 2: Try meta tag
-            try:
-                meta_content = self.page.evaluate('''() => {
-                    const meta = document.querySelector('meta[name="description"]');
-                    return meta ? meta.content : null;
-                }''')
-                if meta_content:
-                    meta_matches = re.findall(r'([\d,\.]+[KkMm]?)\s*Followers', meta_content)
-                    if meta_matches:
-                        count = self._convert_count(meta_matches[0])
-                        if count:
-                            logger.info(f"Found follower count from meta: {count}")
-                            return count
-            except:
-                pass
-
-            # Method 3: Try visible elements
-            try:
-                follower_text = self.page.evaluate('''() => {
-                    const elements = document.querySelectorAll('*');
-                    for (const el of elements) {
-                        if (el.textContent.includes('followers') || el.textContent.includes('Followers')) {
-                            return el.textContent;
+                // Try various methods to find follower count
+                try {
+                    // Method 1: Look for section statistics
+                    const sections = document.querySelectorAll('section');
+                    for (const section of sections) {
+                        if (section.textContent.includes('follower')) {
+                            const text = section.textContent.match(/([\d,.]+[KkMm]?)\s*follower/i);
+                            if (text) {
+                                const count = parseCount(text[1]);
+                                if (count) return count;
+                            }
                         }
                     }
-                    return null;
-                }''')
-                if follower_text:
-                    matches = re.findall(r'([\d,\.]+[KkMm]?)\s*(?:followers|Followers)', follower_text)
+
+                    // Method 2: Check meta description
+                    const metaDesc = document.querySelector('meta[property="og:description"]');
+                    if (metaDesc) {
+                        const text = metaDesc.content.match(/([\d,.]+[KkMm]?)\s*Followers/i);
+                        if (text) {
+                            const count = parseCount(text[1]);
+                            if (count) return count;
+                        }
+                    }
+
+                    // Method 3: Look for specific elements
+                    const selectors = [
+                        'header section ul li',
+                        'span[title*="follower"]',
+                        'a[href*="followers"]',
+                        '[role="button"]:has-text("follower")'
+                    ];
+
+                    for (const selector of selectors) {
+                        const elements = document.querySelectorAll(selector);
+                        for (const el of elements) {
+                            if (el.textContent.includes('follower')) {
+                                const text = el.textContent.match(/([\d,.]+[KkMm]?)/);
+                                if (text) {
+                                    const count = parseCount(text[1]);
+                                    if (count) return count;
+                                }
+                            }
+                        }
+                    }
+
+                    // Method 4: Search all elements as last resort
+                    const allElements = document.querySelectorAll('*');
+                    for (const el of allElements) {
+                        if (el.textContent.includes('follower')) {
+                            const text = el.textContent.match(/([\d,.]+[KkMm]?)\s*follower/i);
+                            if (text) {
+                                const count = parseCount(text[1]);
+                                if (count) return count;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error in follower extraction:', e);
+                }
+
+                return null;
+            }''', username)
+
+            if count:
+                logger.info(f"Found follower count for {username}: {count}")
+                return count
+
+            # If JavaScript method fails, try backup method
+            try:
+                page_content = self.page.content()
+                # Look for follower count in various formats
+                patterns = [
+                    r'"edge_followed_by":\{"count":(\d+)\}',
+                    r'"followers":(\d+)',
+                    r'([\d,\.]+[KkMm]?)\s*Followers',
+                    r'([\d,\.]+[KkMm]?)\s*followers'
+                ]
+
+                for pattern in patterns:
+                    matches = re.findall(pattern, page_content)
                     if matches:
-                        count = self._convert_count(matches[0])
-                        if count:
-                            logger.info(f"Found follower count from text: {count}")
-                            return count
-            except:
-                pass
+                        for match in matches:
+                            count = self._convert_count(match)
+                            if count:
+                                logger.info(f"Found follower count using pattern: {count}")
+                                return count
+
+            except Exception as e:
+                logger.debug(f"Backup extraction failed: {str(e)}")
+
+            # Save debug information
+            self.page.screenshot(path=f'debug_{username}.png')
+            with open(f'debug_{username}.html', 'w', encoding='utf-8') as f:
+                f.write(self.page.content())
 
             logger.error(f"Could not find follower count for {username}")
-            self.page.screenshot(path=f'debug_{username}.png')
             return None
 
         except Exception as e:
@@ -263,7 +272,8 @@ class InstagramScraper:
             else:
                 number = float(count_text) * multiplier
 
-            return int(round(number))
+            result = int(round(number))
+            return result if result > 0 else None
         except:
             return None
 
