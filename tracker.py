@@ -26,12 +26,8 @@ class InstagramScraper:
 
     def __enter__(self):
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.firefox.launch(
+        self.browser = self.playwright.chromium.launch(
             headless=True,
-            firefox_user_prefs={
-                "media.autoplay.default": 2,
-                "media.autoplay.blocking_policy": 2
-            }
         )
         self.context = self.browser.new_context(
             viewport={'width': 1920, 'height': 1080},
