@@ -30,3 +30,13 @@ jobs:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           ACCOUNTS_TO_TRACK: ${{ secrets.ACCOUNTS_TO_TRACK }}
         run: python tracker.py
+
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v2
+        with:
+          name: debug-screenshots
+          path: |
+            *.png
+            debug_*.png
+          retention-days: 5
