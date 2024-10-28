@@ -43,7 +43,6 @@ class InstagramScraper:
             self.playwright.stop()
 
     def verify_login(self):
-        """Verify login status using multiple methods"""
         success_indicators = [
             lambda: not bool(self.page.query_selector('input[name="username"]')),
             lambda: bool(self.page.query_selector('[aria-label="Search"]')),
@@ -52,11 +51,9 @@ class InstagramScraper:
             lambda: bool(self.page.query_selector('a[href="/explore/"]')),
             lambda: 'login' not in self.page.url
         ]
-
         return any(indicator() for indicator in success_indicators)
 
     def login(self):
-        """Login to Instagram with enhanced error handling"""
         try:
             logger.info("Navigating to Instagram login page...")
             self.page.goto('https://www.instagram.com/accounts/login/')
@@ -64,14 +61,23 @@ class InstagramScraper:
 
             logger.info("Entering login credentials...")
             username_field = self.page.wait_for_selector('input[name="username"]', timeout=15000)
+            if not username_field:
+                raise Exception("Username field not found")
+            
             username_field.fill(self.username)
             time.sleep(2)
 
             password_field = self.page.wait_for_selector('input[name="password"]')
+            if not password_field:
+                raise Exception("Password field not found")
+            
             password_field.fill(self.password)
             time.sleep(2)
 
             submit_button = self.page.wait_for_selector('button[type="submit"]')
+            if not submit_button:
+                raise Exception("Submit button not found")
+            
             submit_button.click()
             time.sleep(5)
 
@@ -98,24 +104,23 @@ class InstagramScraper:
 
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
-            self.page.screenshot(path='login_error.png')
+            try:
+                self.page.screenshot(path='login_error.png')
+            except:
+                pass
             raise
 
     def get_follower_count(self, username):
         """Get follower count using multiple extraction methods"""
         try:
             logger.info(f"Getting follower count for {username}...")
-
-            # Navigate to profile and wait for content
             self.page.goto(f'https://www.instagram.com/{username}/')
-            time.sleep(5)  # Allow dynamic content to load
+            time.sleep(5)
 
-            # First get all the HTML content
             page_source = self.page.content()
             with open(f'debug_{username}_source.html', 'w', encoding='utf-8') as f:
                 f.write(page_source)
 
-            # Check for shared data
             shared_data = self.page.evaluate('''() => {
                 try {
                     return window._sharedData;
@@ -134,7 +139,6 @@ class InstagramScraper:
                     logger.warning("Shared data format has changed, unable to access follower count.")
                     raise
 
-            # Method 2: Direct API call (after getting cookies from browser)
             cookies = '; '.join([f"{c['name']}={c['value']}" for c in self.page.context.cookies()])
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -149,11 +153,15 @@ class InstagramScraper:
             )
 
             if response.status_code == 200:
-                data = response.json()
-                if 'data' in data and 'user' in data['data']:
-                    count = data['data']['user']['edge_followed_by']['count']
-                    logger.info(f"Found follower count from API: {count}")
-                    return count
+                try:
+                    data = response.json()
+                    if 'data' in data and 'user' in data['data']:
+                        count = data['data']['user']['edge_followed_by']['count']
+                        logger.info(f"Found follower count from API: {count}")
+                        return count
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON decode error for {username}: {response.text}")
+                    raise
 
             logger.error(f"Could not find follower count for {username}")
             self.page.screenshot(path=f'debug_{username}.png')
@@ -168,6 +176,7 @@ class InstagramScraper:
         """Convert Instagram follower count text to number"""
         try:
             count_text = str(count_text).strip().replace(',', '').lower()
+            
             multiplier = 1
             if 'k' in count_text:
                 multiplier = 1000
@@ -177,7 +186,8 @@ class InstagramScraper:
                 count_text = count_text.replace('m', '')
 
             number = float(count_text) * multiplier
-            return int(round(number)) if number > 0 else None
+            result = int(round(number))
+            return result if result > 0 else None
         except:
             return None
 
@@ -229,28 +239,23 @@ def main():
         username = os.environ['IG_USERNAME']
         password = os.environ['IG_PASSWORD']
         
-        # Setup Google Sheets
         logger.info("Setting up Google Sheets client...")
         sheets_service = setup_google_sheets()
         
-        # Get accounts to track
         accounts = json.loads(os.environ['ACCOUNTS_TO_TRACK'])
         logger.info(f"Tracking {len(accounts)} accounts: {', '.join(accounts)}")
         
-        # Initialize scraper and get follower counts
         with InstagramScraper(username, password) as scraper:
             scraper.login()
             
-            # Get follower counts
             follower_counts = []
             for account in accounts:
                 count = scraper.get_follower_count(account)
                 follower_counts.append(count)
                 time.sleep(random.uniform(2, 4))  # Random delay between accounts
         
-        # Update spreadsheet
         logger.info("Updating Google Spreadsheet...")
-        success = update_spreadsheet(sheets_service, follower_counts)
+        update_spreadsheet(sheets_service, follower_counts)
         
         logger.info("Script completed successfully!")
         
