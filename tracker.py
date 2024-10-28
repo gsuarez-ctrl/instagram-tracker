@@ -48,36 +48,93 @@ class InstagramScraper:
         if self.playwright:
             self.playwright.stop()
 
+    def verify_login(self):
+        """Verify login status using multiple methods"""
+        success_indicators = [
+            lambda: not bool(self.page.query_selector('input[name="username"]')),
+            lambda: bool(self.page.query_selector('[aria-label="Search"]')),
+            lambda: bool(self.page.query_selector('[aria-label="Home"]')),
+            lambda: bool(self.page.query_selector('svg[aria-label="Home"]')),
+            lambda: bool(self.page.query_selector('a[href="/explore/"]')),
+            lambda: 'login' not in self.page.url
+        ]
+
+        return any(indicator() for indicator in success_indicators)
+
+    def wait_for_navigation(self):
+        """Wait for page navigation to complete"""
+        try:
+            self.page.wait_for_load_state('networkidle', timeout=10000)
+            time.sleep(2)  # Additional small delay
+        except:
+            pass
+
     def login(self):
         """Login to Instagram and get necessary tokens"""
         try:
             logger.info("Navigating to Instagram login page...")
-            self.page.goto('https://www.instagram.com/accounts/login/', wait_until='networkidle')
+            self.page.goto('https://www.instagram.com/accounts/login/')
+            self.wait_for_navigation()
             time.sleep(4)
 
             logger.info("Entering login credentials...")
             # Fill username
-            username_field = self.page.wait_for_selector('input[name="username"]', timeout=10000)
+            username_field = self.page.wait_for_selector('input[name="username"]', timeout=15000)
+            if not username_field:
+                raise Exception("Username field not found")
+            
             username_field.fill(self.username)
-            time.sleep(1)
+            time.sleep(2)
 
             # Fill password
             password_field = self.page.wait_for_selector('input[name="password"]')
+            if not password_field:
+                raise Exception("Password field not found")
+            
             password_field.fill(self.password)
-            time.sleep(1)
+            time.sleep(2)
 
             # Click login button
-            self.page.click('button[type="submit"]')
-            time.sleep(5)
+            submit_button = self.page.wait_for_selector('button[type="submit"]')
+            if not submit_button:
+                raise Exception("Submit button not found")
+            
+            submit_button.click()
+            time.sleep(5)  # Wait for login process
 
-            # Wait for successful login
-            self.page.wait_for_selector('svg[aria-label="Home"]', timeout=10000)
+            # Wait for initial navigation
+            self.wait_for_navigation()
+
+            # Multiple verification attempts
+            max_attempts = 3
+            login_verified = False
+            
+            for attempt in range(max_attempts):
+                if self.verify_login():
+                    login_verified = True
+                    break
+                logger.info(f"Login verification attempt {attempt + 1}/{max_attempts}")
+                time.sleep(5)
+
+            if not login_verified:
+                # Try navigating to home page as final attempt
+                self.page.goto('https://www.instagram.com/')
+                self.wait_for_navigation()
+                time.sleep(3)
+                
+                if not self.verify_login():
+                    self.page.screenshot(path='login_failed.png')
+                    raise Exception("Could not verify successful login")
+
             logger.info("Successfully logged in to Instagram")
 
             # Get cookies and csrf token
             cookies = self.context.cookies()
             self.cookies = {cookie['name']: cookie['value'] for cookie in cookies if cookie['domain'] == '.instagram.com'}
             self.csrf_token = self.cookies.get('csrftoken')
+
+            if not self.csrf_token:
+                raise Exception("Could not obtain CSRF token")
 
             return True
 
@@ -94,21 +151,20 @@ class InstagramScraper:
         try:
             logger.info(f"Getting follower count for {username}...")
 
-            # Setup headers for GraphQL request
+            # First try: Public API endpoint
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
                 'Accept': '*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'X-CSRFToken': self.csrf_token,
-                'X-IG-App-ID': '936619743392459',  # Instagram's web app ID
+                'X-IG-App-ID': '936619743392459',
                 'X-ASBD-ID': '198387',
                 'X-IG-WWW-Claim': '0',
                 'X-Requested-With': 'XMLHttpRequest',
                 'Referer': f'https://www.instagram.com/{username}/',
-                'Origin': 'https://www.instagram.com',
+                'Origin': 'https://www.instagram.com'
             }
 
-            # Make request to get user info
             url = f'https://www.instagram.com/api/v1/users/web_profile_info/?username={username}'
             response = requests.get(
                 url,
@@ -124,25 +180,69 @@ class InstagramScraper:
                     logger.info(f"Found follower count for {username}: {count}")
                     return count
 
-            # Backup method using page data
-            if response.status_code != 200:
-                logger.warning(f"API request failed, trying backup method for {username}")
-                self.page.goto(f'https://www.instagram.com/{username}/', wait_until='networkidle')
-                time.sleep(3)
-                
-                # Try to find follower count in page source
-                page_content = self.page.content()
-                matches = re.findall(r'"edge_followed_by":\{"count":(\d+)\}', page_content)
-                if matches:
-                    count = int(matches[0])
-                    logger.info(f"Found follower count using backup method for {username}: {count}")
-                    return count
+            # Second try: Scrape from page
+            logger.info(f"API request failed, trying page scrape for {username}")
+            self.page.goto(f'https://www.instagram.com/{username}/')
+            self.wait_for_navigation()
+            time.sleep(3)
+
+            # Try multiple methods to find follower count
+            page_content = self.page.content()
+            
+            # Method 1: Try JSON data in scripts
+            json_matches = re.findall(r'"edge_followed_by":\{"count":(\d+)\}', page_content)
+            if json_matches:
+                count = int(json_matches[0])
+                logger.info(f"Found follower count from JSON: {count}")
+                return count
+
+            # Method 2: Try meta tag
+            try:
+                meta_content = self.page.evaluate('''() => {
+                    const meta = document.querySelector('meta[name="description"]');
+                    return meta ? meta.content : null;
+                }''')
+                if meta_content:
+                    meta_matches = re.findall(r'([\d,\.]+[KkMm]?)\s*Followers', meta_content)
+                    if meta_matches:
+                        count = self._convert_count(meta_matches[0])
+                        if count:
+                            logger.info(f"Found follower count from meta: {count}")
+                            return count
+            except:
+                pass
+
+            # Method 3: Try visible elements
+            try:
+                follower_text = self.page.evaluate('''() => {
+                    const elements = document.querySelectorAll('*');
+                    for (const el of elements) {
+                        if (el.textContent.includes('followers') || el.textContent.includes('Followers')) {
+                            return el.textContent;
+                        }
+                    }
+                    return null;
+                }''')
+                if follower_text:
+                    matches = re.findall(r'([\d,\.]+[KkMm]?)\s*(?:followers|Followers)', follower_text)
+                    if matches:
+                        count = self._convert_count(matches[0])
+                        if count:
+                            logger.info(f"Found follower count from text: {count}")
+                            return count
+            except:
+                pass
 
             logger.error(f"Could not find follower count for {username}")
+            self.page.screenshot(path=f'debug_{username}.png')
             return None
 
         except Exception as e:
             logger.error(f"Error getting followers for {username}: {str(e)}")
+            try:
+                self.page.screenshot(path=f'error_{username}.png')
+            except:
+                pass
             return None
 
     def _convert_count(self, count_text):
