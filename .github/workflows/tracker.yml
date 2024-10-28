@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install instagrapi==2.0.0 google-api-python-client google-auth-httplib2 google-auth-oauthlib Pillow>=8.1.1
+          pip install instagram-private-api google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
       - name: Run tracker
         env:
