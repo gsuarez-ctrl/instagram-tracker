@@ -3,12 +3,11 @@ import json
 import time
 import random
 import logging
-import requests
+from playwright.sync_api import sync_playwright
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime
 import base64
-import re
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -18,57 +17,55 @@ class InstagramScraper:
     def __init__(self, username, password):
         self.username = username
         self.password = password
-        self.session = requests.Session()
-        self.csrf_token = None
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive',
-        }
-        
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+
+    def __enter__(self):
+        self.playwright = sync_playwright().start()
+        self.browser = self.playwright.firefox.launch(headless=True)
+        self.context = self.browser.new_context()
+        self.page = self.context.new_page()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.browser:
+            self.browser.close()
+        if self.playwright:
+            self.playwright.stop()
+
     def login(self):
         """Login to Instagram"""
         try:
-            # Get the initial csrf token
-            logger.info("Getting initial CSRF token...")
-            initial_response = self.session.get('https://www.instagram.com/accounts/login/', headers=self.headers)
-            csrf_pattern = re.compile(r'"csrf_token":"([^"]+)"')
-            csrf_match = csrf_pattern.search(initial_response.text)
-            if csrf_match:
-                self.csrf_token = csrf_match.group(1)
+            logger.info("Navigating to Instagram login page...")
+            self.page.goto('https://www.instagram.com/accounts/login/')
+            time.sleep(random.uniform(2, 4))
+
+            # Accept cookies if the dialog appears
+            try:
+                self.page.click('text=Accept')
+            except:
+                pass
+
+            logger.info("Entering login credentials...")
+            self.page.fill('input[name="username"]', self.username)
+            self.page.fill('input[name="password"]', self.password)
             
-            # Update headers with csrf token
-            self.headers.update({
-                'X-CSRFToken': self.csrf_token,
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': 'https://www.instagram.com/accounts/login/',
-                'Origin': 'https://www.instagram.com'
-            })
+            time.sleep(random.uniform(1, 2))
+            self.page.click('button[type="submit"]')
             
-            # Prepare login data
-            login_data = {
-                'username': self.username,
-                'enc_password': f'#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{self.password}',
-                'queryParams': {},
-                'optIntoOneTap': 'false'
-            }
-            
-            # Perform login
-            logger.info("Attempting to login...")
-            login_response = self.session.post(
-                'https://www.instagram.com/accounts/login/ajax/',
-                data=login_data,
-                headers=self.headers,
-                allow_redirects=True
-            )
-            
-            if login_response.json().get('authenticated'):
+            # Wait for navigation
+            self.page.wait_for_load_state('networkidle')
+            time.sleep(random.uniform(3, 5))
+
+            # Check if login was successful
+            if '/accounts/onetap/' in self.page.url or '/accounts/login/' not in self.page.url:
                 logger.info("Successfully logged in to Instagram")
                 return True
             else:
-                raise Exception(f"Login failed: {login_response.text}")
-            
+                raise Exception("Login failed - redirected to login page")
+
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
             raise
@@ -76,25 +73,36 @@ class InstagramScraper:
     def get_follower_count(self, username):
         """Get follower count for a specific account"""
         try:
-            # Add random delay
+            # Navigate to user profile
+            logger.info(f"Navigating to {username}'s profile...")
+            self.page.goto(f'https://www.instagram.com/{username}/')
             time.sleep(random.uniform(2, 4))
+
+            # Wait for follower count to be visible
+            follower_element = self.page.wait_for_selector('a[href$="/followers/"] span')
+            follower_text = follower_element.inner_text()
             
-            # Get user page
-            response = self.session.get(
-                f'https://www.instagram.com/{username}/?__a=1&__d=dis',
-                headers=self.headers
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if 'graphql' in data:
-                    user_data = data['graphql']['user']
-                    return user_data['edge_followed_by']['count']
-            
-            raise Exception(f"Could not get follower count for {username}")
-            
+            # Convert text to number
+            follower_count = self._convert_count(follower_text)
+            logger.info(f"Successfully retrieved follower count for {username}: {follower_count}")
+            return follower_count
+
         except Exception as e:
             logger.error(f"Error getting followers for {username}: {str(e)}")
+            return None
+
+    def _convert_count(self, count_text):
+        """Convert Instagram follower count text to number"""
+        try:
+            count_text = count_text.replace(',', '').replace('.', '').lower()
+            if 'k' in count_text:
+                count = float(count_text.replace('k', '')) * 1000
+            elif 'm' in count_text:
+                count = float(count_text.replace('m', '')) * 1000000
+            else:
+                count = int(count_text)
+            return int(count)
+        except:
             return None
 
 def setup_google_sheets():
@@ -142,13 +150,8 @@ def main():
     logger.info("Starting Instagram follower tracking...")
     
     try:
-        # Initialize Instagram scraper
         username = os.environ['IG_USERNAME']
         password = os.environ['IG_PASSWORD']
-        
-        logger.info("Setting up Instagram scraper...")
-        scraper = InstagramScraper(username, password)
-        scraper.login()
         
         # Setup Google Sheets
         logger.info("Setting up Google Sheets client...")
@@ -158,13 +161,18 @@ def main():
         accounts = json.loads(os.environ['ACCOUNTS_TO_TRACK'])
         logger.info(f"Tracking {len(accounts)} accounts: {', '.join(accounts)}")
         
-        # Get follower counts
-        follower_counts = []
-        for account in accounts:
-            logger.info(f"Getting follower count for {account}...")
-            count = scraper.get_follower_count(account)
-            follower_counts.append(count)
-            time.sleep(random.uniform(3, 5))  # Random delay between accounts
+        # Initialize scraper and get follower counts
+        with InstagramScraper(username, password) as scraper:
+            logger.info("Setting up Instagram scraper...")
+            scraper.login()
+            
+            # Get follower counts
+            follower_counts = []
+            for account in accounts:
+                logger.info(f"Getting follower count for {account}...")
+                count = scraper.get_follower_count(account)
+                follower_counts.append(count)
+                time.sleep(random.uniform(3, 5))
         
         # Update spreadsheet
         logger.info("Updating Google Spreadsheet...")
