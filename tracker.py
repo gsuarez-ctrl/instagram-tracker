@@ -115,14 +115,20 @@ def update_spreadsheet(service, data):
         date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         values = [[date] + [str(count) if count is not None else 'N/A' for count in data]]
         
+        # Calculate the correct range based on number of columns needed
+        num_columns = len(values[0])  # Date column + number of accounts
+        end_column = chr(ord('A') + num_columns - 1)  # Convert number to letter (A, B, C, etc.)
+        range_string = f'Sheet1!A1:{end_column}1'
+        
         body = {
             'values': values
         }
         
         service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
-            range='Sheet1!A:Z',
+            range=range_string,
             valueInputOption='USER_ENTERED',
+            insertDataOption='INSERT_ROWS',
             body=body
         ).execute()
         
