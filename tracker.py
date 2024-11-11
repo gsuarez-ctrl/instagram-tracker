@@ -4,7 +4,7 @@ import time
 import random
 import logging
 from datetime import datetime
-import instaloader
+import instaloader 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import base64
@@ -153,16 +153,29 @@ def main():
         
         # Get follower counts with retry mechanism
         follower_counts = []
-        for account in accounts:
+        for i, account in enumerate(accounts):
             try:
+                # Add initial delay before first request
+                if i == 0:
+                    time.sleep(random.uniform(2, 4))
+                    
                 count = scraper.get_follower_count(account)
                 follower_counts.append(count)
-                # Random delay between requests to avoid rate limiting
-                time.sleep(random.uniform(3, 5))
+                
+                # Add longer delays every few accounts to avoid rate limiting
+                if (i + 1) % 5 == 0:
+                    logger.info("Taking a longer break to avoid rate limiting...")
+                    time.sleep(random.uniform(30, 35))
+                else:
+                    # Random delay between requests
+                    delay = random.uniform(10, 15)
+                    logger.info(f"Waiting {delay:.2f} seconds before next request...")
+                    time.sleep(delay)
+                    
             except Exception as e:
                 logger.error(f"Failed to get count for {account}: {str(e)}")
                 follower_counts.append(None)
-                time.sleep(5)  # Additional delay after error
+                time.sleep(20)  # Additional delay after error
         
         # Update spreadsheet
         logger.info("Updating Google Spreadsheet...")
