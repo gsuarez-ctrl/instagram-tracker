@@ -16,8 +16,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class InstagramScraper:
-    def __init__(self, session_cookie):
-        self.session_cookie = session_cookie
+    def __init__(self, username, password):
+        self.username = username
+        self.password = password
         self.loader = instaloader.Instaloader(
             quiet=True,
             download_pictures=False,
@@ -28,48 +29,17 @@ class InstagramScraper:
             save_metadata=False,
             compress_json=False
         )
-        self.context = instaloader.InstaloaderContext(self.loader)
-        self.session = None
 
-    def login_with_session(self):
-        """Login to Instagram using session cookie"""
+    def login(self):
+        """Login to Instagram using username and password"""
         try:
-            logger.info("Logging in to Instagram using session cookie...")
-            
-            # Create session and set cookie
-            self.session = requests.Session()
-            self.session.cookies.set('sessionid', self.session_cookie, domain='.instagram.com')
-            self.session.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Connection': 'keep-alive'
-            })
-            
-            # Set the session in the context
-            self.context._session = self.session
-            self.loader.context = self.context
-            
-            # Verify session is working
-            try:
-                test_profile = instaloader.Profile.from_username(self.loader.context, "instagram")
-                if test_profile.followers > 0:
-                    logger.info("Successfully logged in to Instagram")
-                    return True
-            except Exception as e:
-                logger.error(f"Session verification failed: {str(e)}")
-                raise
-                
+            logger.info("Logging in to Instagram...")
+            self.loader.login(self.username, self.password)
+            logger.info("Successfully logged in to Instagram")
+            return True
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
             raise
-
-    def refresh_session(self):
-        """Refresh the session when it expires"""
-        logger.info("Refreshing Instagram session...")
-        time.sleep(random.uniform(5, 10))  # Cool down period
-        self.login_with_session()
-        time.sleep(random.uniform(2, 4))  # Wait after refresh
 
     def get_follower_count(self, username):
         """Get follower count for a specific account"""
@@ -91,10 +61,6 @@ class InstagramScraper:
                 logger.error(f"Profile {username} does not exist")
                 return None
             except Exception as e:
-                if "challenge_required" in str(e) or "login" in str(e).lower():
-                    logger.warning(f"Session expired, attempting refresh...")
-                    self.refresh_session()
-                
                 if attempt < max_retries - 1:
                     logger.warning(f"Attempt {attempt + 1} failed for {username}: {str(e)}")
                     time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
@@ -149,7 +115,9 @@ def main():
     logger.info("Starting Instagram follower tracking...")
     
     try:
-        session_cookie = os.environ['IG_SESSION_COOKIE']
+        # Get Instagram credentials from environment variables
+        username = os.environ['IG_USERNAME']
+        password = os.environ['IG_PASSWORD']
         
         # Setup Google Sheets
         logger.info("Setting up Google Sheets client...")
@@ -160,8 +128,8 @@ def main():
         logger.info(f"Tracking {len(accounts)} accounts: {', '.join(accounts)}")
         
         # Initialize scraper and login
-        scraper = InstagramScraper(session_cookie)
-        scraper.login_with_session()
+        scraper = InstagramScraper(username, password)
+        scraper.login()
         
         # Get follower counts with retry mechanism
         follower_counts = []
