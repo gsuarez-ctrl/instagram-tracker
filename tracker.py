@@ -4,10 +4,12 @@ import time
 import random
 import logging
 from datetime import datetime
-import requests
+import instaloader
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import base64
+import requests
+import pickle
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -15,24 +17,54 @@ logger = logging.getLogger(__name__)
 
 class InstagramScraper:
     def __init__(self, session_cookie):
-        self.session = requests.Session()
-        self.session.cookies.set('sessionid', session_cookie, domain='.instagram.com')
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'X-IG-App-ID': '936619743392459',  # Instagram's web app ID
-            'X-Requested-With': 'XMLHttpRequest',
-            'Origin': 'https://www.instagram.com',
-            'Referer': 'https://www.instagram.com/',
-            'Connection': 'keep-alive',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site'
-        })
+        self.session_cookie = session_cookie
+        self.loader = instaloader.Instaloader(
+            quiet=True,
+            download_pictures=False,
+            download_videos=False,
+            download_video_thumbnails=False,
+            download_geotags=False,
+            download_comments=False,
+            save_metadata=False,
+            compress_json=False
+        )
+        self.context = instaloader.InstaloaderContext(self.loader)
+
+    def login_with_session(self):
+        """Login to Instagram using session cookie"""
+        try:
+            logger.info("Logging in to Instagram using session cookie...")
+            
+            # Create session and set cookie
+            session = requests.Session()
+            session.cookies.set('sessionid', self.session_cookie, domain='.instagram.com')
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Connection': 'keep-alive'
+            })
+            
+            # Set the session in the context
+            self.context._session = session
+            self.loader.context = self.context
+            
+            # Verify session is working
+            try:
+                test_profile = instaloader.Profile.from_username(self.loader.context, "instagram")
+                if test_profile.followers > 0:
+                    logger.info("Successfully logged in to Instagram")
+                    return True
+            except Exception as e:
+                logger.error(f"Session verification failed: {str(e)}")
+                raise
+                
+        except Exception as e:
+            logger.error(f"Login failed: {str(e)}")
+            raise
 
     def get_follower_count(self, username):
-        """Get follower count using Instagram's GraphQL API"""
+        """Get follower count for a specific account"""
         max_retries = 3
         retry_delay = 5
 
@@ -40,38 +72,24 @@ class InstagramScraper:
             try:
                 logger.info(f"Getting follower count for {username} (attempt {attempt + 1}/{max_retries})...")
                 
-                # Use Instagram's user info endpoint
-                url = f'https://i.instagram.com/api/v1/users/web_profile_info/?username={username}'
-                response = self.session.get(url)
+                # Get profile info
+                profile = instaloader.Profile.from_username(self.loader.context, username)
+                count = profile.followers
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'data' in data and 'user' in data['data']:
-                        count = data['data']['user']['edge_followed_by']['count']
-                        logger.info(f"Found follower count for {username}: {count}")
-                        return count
-                
-                # Handle rate limiting
-                if response.status_code == 429:
-                    wait_time = random.uniform(30, 60)
-                    logger.warning(f"Rate limited. Waiting {wait_time} seconds...")
-                    time.sleep(wait_time)
-                    continue
-                
-                # Handle other errors
-                logger.warning(f"Attempt {attempt + 1} failed for {username}: Status {response.status_code}")
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay * (attempt + 1))
-                    continue
-                    
+                logger.info(f"Found follower count for {username}: {count}")
+                return count
+
+            except instaloader.exceptions.ProfileNotExistsException:
+                logger.error(f"Profile {username} does not exist")
+                return None
             except Exception as e:
-                logger.warning(f"Attempt {attempt + 1} failed for {username}: {str(e)}")
                 if attempt < max_retries - 1:
-                    time.sleep(retry_delay * (attempt + 1))
+                    logger.warning(f"Attempt {attempt + 1} failed for {username}: {str(e)}")
+                    time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
                     continue
-        
-        logger.error(f"Failed to get follower count for {username} after {max_retries} attempts")
-        return None
+                else:
+                    logger.error(f"Error getting followers for {username} after {max_retries} attempts: {str(e)}")
+                    return None
 
 def setup_google_sheets():
     """Setup Google Sheets API client"""
@@ -101,9 +119,10 @@ def update_spreadsheet(service, data):
             'values': values
         }
         
+        # Using correct sheet name and wider range
         service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
-            range='followers!A:Z',
+            range='followers!A:Z',  # Using 'followers' sheet name and range up to Z
             valueInputOption='USER_ENTERED',
             body=body
         ).execute()
@@ -128,27 +147,22 @@ def main():
         accounts = json.loads(os.environ['ACCOUNTS_TO_TRACK'])
         logger.info(f"Tracking {len(accounts)} accounts: {', '.join(accounts)}")
         
-        # Initialize scraper
+        # Initialize scraper and login
         scraper = InstagramScraper(session_cookie)
+        scraper.login_with_session()
         
         # Get follower counts with retry mechanism
         follower_counts = []
-        for i, account in enumerate(accounts):
+        for account in accounts:
             try:
                 count = scraper.get_follower_count(account)
                 follower_counts.append(count)
-                
-                # Add longer delays every few accounts to avoid rate limiting
-                if (i + 1) % 3 == 0:
-                    logger.info("Taking a longer break to avoid rate limiting...")
-                    time.sleep(random.uniform(25, 30))
-                else:
-                    time.sleep(random.uniform(10, 15))  # Increased delay between requests
-                    
+                # Random delay between requests to avoid rate limiting
+                time.sleep(random.uniform(3, 5))
             except Exception as e:
                 logger.error(f"Failed to get count for {account}: {str(e)}")
                 follower_counts.append(None)
-                time.sleep(15)  # Additional delay after error
+                time.sleep(5)  # Additional delay after error
         
         # Update spreadsheet
         logger.info("Updating Google Spreadsheet...")
