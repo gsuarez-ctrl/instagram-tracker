@@ -29,6 +29,7 @@ class InstagramScraper:
             compress_json=False
         )
         self.context = instaloader.InstaloaderContext(self.loader)
+        self.session = None
 
     def login_with_session(self):
         """Login to Instagram using session cookie"""
@@ -36,9 +37,9 @@ class InstagramScraper:
             logger.info("Logging in to Instagram using session cookie...")
             
             # Create session and set cookie
-            session = requests.Session()
-            session.cookies.set('sessionid', self.session_cookie, domain='.instagram.com')
-            session.headers.update({
+            self.session = requests.Session()
+            self.session.cookies.set('sessionid', self.session_cookie, domain='.instagram.com')
+            self.session.headers.update({
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
                 'Accept': '*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -46,7 +47,7 @@ class InstagramScraper:
             })
             
             # Set the session in the context
-            self.context._session = session
+            self.context._session = self.session
             self.loader.context = self.context
             
             # Verify session is working
@@ -62,6 +63,13 @@ class InstagramScraper:
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
             raise
+
+    def refresh_session(self):
+        """Refresh the session when it expires"""
+        logger.info("Refreshing Instagram session...")
+        time.sleep(random.uniform(5, 10))  # Cool down period
+        self.login_with_session()
+        time.sleep(random.uniform(2, 4))  # Wait after refresh
 
     def get_follower_count(self, username):
         """Get follower count for a specific account"""
@@ -83,6 +91,10 @@ class InstagramScraper:
                 logger.error(f"Profile {username} does not exist")
                 return None
             except Exception as e:
+                if "challenge_required" in str(e) or "login" in str(e).lower():
+                    logger.warning(f"Session expired, attempting refresh...")
+                    self.refresh_session()
+                
                 if attempt < max_retries - 1:
                     logger.warning(f"Attempt {attempt + 1} failed for {username}: {str(e)}")
                     time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
@@ -153,16 +165,22 @@ def main():
         
         # Get follower counts with retry mechanism
         follower_counts = []
-        for account in accounts:
+        for i, account in enumerate(accounts):
             try:
                 count = scraper.get_follower_count(account)
                 follower_counts.append(count)
-                # Random delay between requests to avoid rate limiting
-                time.sleep(random.uniform(3, 5))
+                
+                # Add longer delays every few accounts to avoid rate limiting
+                if (i + 1) % 4 == 0:
+                    logger.info("Taking a longer break to avoid rate limiting...")
+                    time.sleep(random.uniform(15, 20))
+                else:
+                    time.sleep(random.uniform(5, 8))  # Increased delay between requests
+                    
             except Exception as e:
                 logger.error(f"Failed to get count for {account}: {str(e)}")
                 follower_counts.append(None)
-                time.sleep(5)  # Additional delay after error
+                time.sleep(10)  # Additional delay after error
         
         # Update spreadsheet
         logger.info("Updating Google Spreadsheet...")
