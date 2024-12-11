@@ -9,7 +9,6 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import base64
 import requests
-import pickle
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -63,14 +62,14 @@ class InstagramScraper:
             logger.error(f"Login failed: {str(e)}")
             raise
 
-    def get_follower_count(self, username):
+    def get_follower_count(self, username, account_type="client"):
         """Get follower count for a specific account"""
         max_retries = 3
         retry_delay = 5
 
         for attempt in range(max_retries):
             try:
-                logger.info(f"Getting follower count for {username} (attempt {attempt + 1}/{max_retries})...")
+                logger.info(f"Getting follower count for {username} ({account_type}) (attempt {attempt + 1}/{max_retries})...")
                 
                 # Get profile info
                 profile = instaloader.Profile.from_username(self.loader.context, username)
@@ -108,7 +107,7 @@ def setup_google_sheets():
         logger.error(f"Failed to setup Google Sheets: {str(e)}")
         raise
 
-def update_spreadsheet(service, data):
+def update_spreadsheet(service, data, sheet_name):
     """Update Google Spreadsheet with follower counts"""
     try:
         spreadsheet_id = os.environ['SPREADSHEET_ID']
@@ -119,19 +118,54 @@ def update_spreadsheet(service, data):
             'values': values
         }
         
-        # Using correct sheet name and wider range
+        # Using specified sheet name
         service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
-            range='followers!A:Z',  # Using 'followers' sheet name and range up to Z
+            range=f'{sheet_name}!A:Z',
             valueInputOption='USER_ENTERED',
             body=body
         ).execute()
         
-        logger.info(f"Data updated successfully at {date}")
+        logger.info(f"Data updated successfully in {sheet_name} sheet at {date}")
         return True
     except Exception as e:
         logger.error(f"Error updating spreadsheet: {str(e)}")
         raise
+
+def process_accounts(scraper, accounts, account_type, sheets_service):
+    """Process a list of accounts and update their data"""
+    logger.info(f"Processing {len(accounts)} {account_type} accounts...")
+    
+    follower_counts = []
+    for i, account in enumerate(accounts):
+        try:
+            # Add initial delay before first request
+            if i == 0:
+                time.sleep(random.uniform(2, 4))
+                
+            count = scraper.get_follower_count(account, account_type)
+            follower_counts.append(count)
+            
+            # Add longer delays every few accounts to avoid rate limiting
+            if (i + 1) % 5 == 0:
+                logger.info("Taking a longer break to avoid rate limiting...")
+                time.sleep(random.uniform(30, 35))
+            else:
+                # Random delay between requests
+                delay = random.uniform(10, 15)
+                logger.info(f"Waiting {delay:.2f} seconds before next request...")
+                time.sleep(delay)
+                
+        except Exception as e:
+            logger.error(f"Failed to get count for {account}: {str(e)}")
+            follower_counts.append(None)
+            time.sleep(20)  # Additional delay after error
+    
+    # Update appropriate sheet based on account type
+    sheet_name = 'clients' if account_type == "client" else 'competitors'
+    update_spreadsheet(sheets_service, follower_counts, sheet_name)
+    
+    return follower_counts
 
 def main():
     logger.info("Starting Instagram follower tracking...")
@@ -143,43 +177,26 @@ def main():
         logger.info("Setting up Google Sheets client...")
         sheets_service = setup_google_sheets()
         
-        # Get accounts to track
-        accounts = json.loads(os.environ['ACCOUNTS_TO_TRACK'])
-        logger.info(f"Tracking {len(accounts)} accounts: {', '.join(accounts)}")
+        # Get both client and competitor accounts
+        client_accounts = json.loads(os.environ['ACCOUNTS_TO_TRACK'])
+        competitor_accounts = json.loads(os.environ['COMPETITOR_ACCOUNTS'])
+        
+        logger.info(f"Tracking {len(client_accounts)} client accounts and {len(competitor_accounts)} competitor accounts")
         
         # Initialize scraper and login
         scraper = InstagramScraper(session_cookie)
         scraper.login_with_session()
         
-        # Get follower counts with retry mechanism
-        follower_counts = []
-        for i, account in enumerate(accounts):
-            try:
-                # Add initial delay before first request
-                if i == 0:
-                    time.sleep(random.uniform(2, 4))
-                    
-                count = scraper.get_follower_count(account)
-                follower_counts.append(count)
-                
-                # Add longer delays every few accounts to avoid rate limiting
-                if (i + 1) % 5 == 0:
-                    logger.info("Taking a longer break to avoid rate limiting...")
-                    time.sleep(random.uniform(30, 35))
-                else:
-                    # Random delay between requests
-                    delay = random.uniform(10, 15)
-                    logger.info(f"Waiting {delay:.2f} seconds before next request...")
-                    time.sleep(delay)
-                    
-            except Exception as e:
-                logger.error(f"Failed to get count for {account}: {str(e)}")
-                follower_counts.append(None)
-                time.sleep(20)  # Additional delay after error
+        # Process client accounts
+        logger.info("Processing client accounts...")
+        client_counts = process_accounts(scraper, client_accounts, "client", sheets_service)
         
-        # Update spreadsheet
-        logger.info("Updating Google Spreadsheet...")
-        success = update_spreadsheet(sheets_service, follower_counts)
+        # Add a longer delay between processing client and competitor accounts
+        time.sleep(random.uniform(45, 60))
+        
+        # Process competitor accounts
+        logger.info("Processing competitor accounts...")
+        competitor_counts = process_accounts(scraper, competitor_accounts, "competitor", sheets_service)
         
         logger.info("Script completed successfully!")
         
