@@ -3,8 +3,8 @@ name: Instagram Follower Tracker
 # Define when the workflow should run
 on:
   schedule:
-    # Run at 9 AM UTC on the 1st of every month
-    - cron: '0 9 1 * *'
+    # Run at 9 AM UTC every Monday
+    - cron: '0 9 * * 1'
   # Allow manual triggering for testing purposes
   workflow_dispatch:
 
